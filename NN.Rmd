@@ -1,0 +1,307 @@
+---
+title: "Main"
+author: "Haojie Liu"
+date: "2024-01-07"
+output: pdf_document
+---
+
+```{r}
+library(tidytext)
+library(tidyverse)
+library(neuralnet)
+library(tensorflow)
+library(ggplot2)
+library(fastDummies)
+library(reticulate)
+library(pROC)
+```
+
+```{r}
+essays <- read.csv("train_essays.csv")
+prompts <- read.csv("train_prompts.csv")
+test <- read.csv("test_essays.csv") 
+```
+
+```{r}
+
+full_train <- essays %>% 
+  full_join(prompts)
+
+full_train <- full_train %>% 
+  select(-instructions,-source_text, -prompt_name) %>% 
+  mutate(prompt_id = as.factor(prompt_id),
+         generated = as.factor(generated))
+
+unnested_words <- full_train %>% 
+  unnest_tokens(word, text)
+
+# count the number of words in each essay
+
+word_count <- unnested_words %>% 
+  group_by(id) %>% 
+  summarise(word_count = n())
+
+full_train <- full_train %>% 
+  left_join(word_count)
+
+```
+
+```{r}
+
+# we can see that the fake essays usually have a less number of word count
+
+full_train %>% 
+  group_by(generated) %>% 
+  summarise(mean(word_count))
+```
+
+```{r}
+unnested_sentence <- full_train %>% 
+  unnest_sentences(sentence, text)
+
+# count the number of words in each essay
+
+sentence_count <- unnested_sentence %>% 
+  group_by(id) %>% 
+  summarise(sentence_count = n())
+
+full_train <- full_train %>% 
+  left_join(sentence_count)
+```
+
+```{r}
+full_train
+```
+
+
+
+# sentiment analysis
+```{r}
+
+NRC <- get_sentiments("nrc")
+data("stop_words")
+
+sentiment_NRC <- unnested_words %>% 
+  anti_join(stop_words) %>% # take off some stop words
+  inner_join(NRC) %>% 
+  mutate(sentiment = as.factor(sentiment))
+
+sentiment_NRC <- data.frame(table(sentiment_NRC$id, sentiment_NRC$sentiment)) %>% 
+  pivot_wider(names_from = Var2, values_from = Freq)
+
+attributes(sentiment_NRC)$names[1] <- "id" 
+
+
+full_train <- full_train %>% 
+  left_join(sentiment_NRC)
+```
+
+```{r}
+full_train <- full_train %>% 
+  mutate(total_sentiment = anger + anticipation + disgust + fear + joy + negative + positive + sadness + surprise + trust) %>% 
+  mutate(p_anger = anger/total_sentiment,
+         p_anticipation = anticipation/total_sentiment,
+         p_fear = fear/total_sentiment,
+         p_joy = joy/total_sentiment,
+         p_negative = negative/total_sentiment,
+         p_positive = positive/total_sentiment,
+         p_sadness = sadness/total_sentiment,
+         p_surprice = surprise/total_sentiment,
+         p_trust = trust/total_sentiment)
+```
+
+
+```{r}
+NRC_mean <- full_train %>% 
+  group_by(generated) %>% 
+  summarise(mean(p_anger), 
+            mean(p_anticipation), 
+            mean(p_fear), 
+            mean(p_fear), 
+            mean(p_joy), 
+            mean(p_negative),
+            mean(p_positive), 
+            mean(p_sadness), 
+            mean(p_surprice), 
+            mean(p_trust)) %>% 
+  pivot_longer(cols = -generated, names_to = "emotion", values_to = "mean") %>% 
+  mutate(emotion = as.factor(emotion))
+
+NRC_mean %>% 
+  ggplot(aes(x = emotion,
+             y = mean,
+             fill = generated))+ geom_bar(stat = "identity", position = "dodge")  +theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  
+```
+
+Neural network 1
+
+```{r}
+full_train <- full_train %>% 
+  select(-text) %>% 
+  select(-id) %>% 
+  select(-anger) %>% 
+  select(-anticipation) %>% 
+  select(-disgust) %>% 
+  select(-fear) %>% 
+  select(-joy) %>% 
+  select(-negative) %>% 
+  select(-positive) %>% 
+  select(-sadness) %>% 
+  select(-surprise) %>% 
+  select(-trust) %>% 
+  select(-total_sentiment) %>%
+  select(-prompt_id) %>% 
+  mutate_if(is.factor, as.numeric) %>% 
+  mutate(generated = generated-1)
+```
+
+
+```{r}
+set.seed(123)
+
+data_rows <- floor(0.75 * nrow(full_train))
+train_indices <- sample(c(1:nrow(full_train)), data_rows)
+train_data <- full_train[train_indices,]
+test_data <- full_train[-train_indices,]
+train_data
+```
+
+
+```{r message=FALSE}
+
+set.seed(123) # For reproducibility
+
+# Define the ranges for different parameters
+neuron_choices <- list()
+for(i in seq(1,300,by=3)){
+  neuron_choices[[i]] <- sample(1:9, 3)
+  neuron_choices[[i+1]] <- sample(1:9, 2)
+  neuron_choices[[i+2]] <- sample(1:9, 4)
+}
+learning_rate_choices <- sample(0.01:1,300,replace =TRUE)
+threshold_choices <- sample(0.01:1,300,replace =TRUE)
+max_iter_choices <- sample(200:5000,300,replace =TRUE)
+activation_function_choices <- c("logistic", "tanh")
+
+# Placeholder for model results
+results <- vector("list", 300)
+
+for (i in 1:300) {
+  neurons <- sample(neuron_choices, 1)[[1]]
+  learning_rate <- sample(learning_rate_choices, 1)
+  threshold <- sample(threshold_choices, 1)
+  max_iter <- sample(max_iter_choices, 1)
+  act_func <- sample(activation_function_choices, 1)
+  
+  # Train the model
+  model <- neuralnet(
+    formula = generated ~ .,
+    data = train_data,
+    hidden = neurons,
+    learningrate = learning_rate,
+    threshold = threshold,
+    stepmax = max_iter,
+    act.fct = act_func,
+    linear.output = FALSE
+  )
+
+  # Compute predictions and generate ROC data
+  predictions <- compute(model, test_data[-which(names(test_data) == "generated")])
+  predicted_values <- predictions$net.result[,1]
+  roc_data <- roc(response = test_data$generated, predictor = as.numeric(predicted_values))
+  auc <- auc(roc_data)
+
+  # Store the model and its performance metrics
+  results[[i]] <- list(
+    "model" = model,
+    "parameters" = list(
+      "neurons" = neurons,
+      "learning_rate" = learning_rate,
+      "threshold" = threshold,
+      "max_iter" = max_iter,
+      "activation_function" = act_func
+    ),
+    "auc" = auc
+  )
+}
+
+# Analyze the results to find the best model based on AUC
+best_model_index <- which.max(sapply(results, function(x) x$auc))
+best_model <- results[[best_model_index]]$model
+
+plot(best_model)
+```
+
+```{r}
+pred <- predict(best_model, test_data)
+labels <- c(0,1)
+prediction_label <- data.frame(max.col(pred)) %>%     
+  mutate(pred=labels[max.col.pred.]) %>%
+  select(2) %>%
+  unlist()
+
+test_data
+table(test_data$generated, prediction_label) %>% 
+  data.frame() %>% 
+  summarise(accuracy = (345-2)/345)
+```
+```{r}
+full_test <- test %>% 
+  unnest_tokens(word, text) %>% 
+  group_by(id) %>% 
+  summarise(word_count = n()) %>% 
+  left_join(test)
+
+full_test <- full_test %>% 
+  unnest_tokens(word, text) %>% 
+    mutate(p_anger = 0,
+         p_anticipation = 0,
+         p_fear = 0,
+         p_joy = 0,
+         p_negative = 0,
+         p_positive = 0,
+         p_sadness = 0,
+         p_surprice = 0,
+         p_trust = 0)
+
+full_test <- full_test %>% 
+  select(-prompt_id) %>% 
+  select(-word) %>% 
+  right_join(test) %>% 
+  unique()
+
+```
+
+
+```{r}
+
+final_model <- neuralnet(
+    formula = generated ~ .,
+    data = full_train,
+    hidden = c(6,5,1),
+    learningrate = 0.01,
+    threshold = 0.01,
+    stepmax = 3147,
+    act.fct = "logistic",
+    linear.output = FALSE
+  )
+
+realtest <- full_test %>% 
+  select(-id) %>% 
+  select(-prompt_id)
+  
+pred <- predict(final_model, realtest)
+
+result <- bind_cols(id = test$id, 
+                generated = pred)
+write.csv(result, "submission.csv", row.names=FALSE)
+result
+
+```
+
+
+
+
+
