@@ -45,8 +45,8 @@ The analysis involved examining various features to discern patterns distinguish
 
 ## Results
 
-- **Neural Network Model**: Demonstrated an accuracy of [insert accuracy]% in classifying essays.
-- **Boosted Model**: XGBoost showed [insert performance metrics], suggesting [insert findings].
+- **Neural Network Model**: Demonstrated an accuracy of 49% in classifying essays.
+- **Boosted Model**: XGBoost showed 0.02 mean of mse
 
 ## Conclusion
 
